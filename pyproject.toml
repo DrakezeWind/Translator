@@ -1,7 +1,7 @@
 [project]
 name = "translator"
 version = "0.1.0"
-description = "Add your description here"
+description = "This is a test translator learning how to code in python"
 requires-python = ">=3.13"
 dependencies = [
     "deep-translator>=1.11.4",
@@ -11,3 +11,6 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
