@@ -70,3 +70,30 @@ boundary alone is sufficient.
   scope" call above): recent translations are persisted to a local JSON
   file (`translator/history.py`) and shown inline on the same page. Still
   single-user, single-machine — no sync, no database.
+- Nav simplified: dropped the "Translator / History / About" text links
+  from the header (history is already visible inline, nothing else to
+  navigate to) — kept the settings icon as decorative.
+- Voice added, both directions, via the browser's native Web Speech API
+  (`SpeechRecognition` for mic input, `SpeechSynthesis` for speaker
+  output) — zero new Python dependencies, bridged into NiceGUI through
+  its `ui.on()`/`emitEvent()` global-event mechanism. A `voice_error`
+  event covers both "browser doesn't support it" (mic support is
+  Chromium-only in practice) and runtime errors, surfaced via
+  `ui.notify()` instead of a silently dead button.
+- Real pixel-art logo (`translator/static/logo.png`) replaces the
+  placeholder header dot; also set as the browser favicon.
+- Deployed to Fly.io: `Dockerfile` (uv's official Python base image),
+  `fly.toml` (persistent volume at `/data` so history survives restarts),
+  `.dockerignore`. `translator/web.py`'s `run()` and `translator/history.py`
+  now read `PORT`/`ENV`/`HISTORY_FILE_PATH` from the environment so the
+  same code runs locally and in the container (dev auto-reload and
+  auto-opening a browser are both disabled when `ENV=production`).
+  Live at `translator.drakeze.com` (Cloudflare DNS, `A`/`AAAA` records,
+  DNS-only/un-proxied per Fly's TLS requirements).
+- Fixed a pre-existing bug found while containerizing: `.python-version`
+  held this machine's literal absolute interpreter path
+  (`/usr/bin/python3.10`) instead of a version string — broke `uv sync
+  --frozen` inside the container. Corrected to `3.10`.
+- Added to the Drakeze Portfolio's `/projects` page as a project card
+  (`Portfolio/components/banners/TranslatorBanner.jsx`, pink accent
+  `#D6336C`), linking to the live site and the now-pushed GitHub repo.
