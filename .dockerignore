@@ -1,0 +1,14 @@
+.venv/
+.git/
+.github/
+.claude/
+.claude-flow/
+__pycache__/
+*.pyc
+.pytest_cache/
+.translator_history.json
+docs/
+tests/
+fly.toml
+Dockerfile
+.dockerignore

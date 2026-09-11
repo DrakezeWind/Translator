@@ -60,3 +60,13 @@ invalid language pair raises). No framework, no fixtures.
 stream-chat bot would import it directly rather than going through the
 GUI. No extra abstraction is being added now to support that; the module
 boundary alone is sufficient.
+
+## Addendum — 2026-09-11
+
+- GUI rebuilt: Tkinter (`translator/gui.py`) replaced by a NiceGUI local web
+  app (`translator/web.py`), styled to match an approved dark-mode mockup.
+  `translator/engine.py`'s public interface is unchanged.
+- Local translation history is now in scope (reversing the original "out of
+  scope" call above): recent translations are persisted to a local JSON
+  file (`translator/history.py`) and shown inline on the same page. Still
+  single-user, single-machine — no sync, no database.

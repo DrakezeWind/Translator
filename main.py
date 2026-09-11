@@ -1,4 +1,4 @@
-from translator.gui import run
+from translator.web import run
 
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     run()
