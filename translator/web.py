@@ -2,7 +2,8 @@ import json
 import os
 from pathlib import Path
 
-from nicegui import app, ui
+# _run alias: module-level def run() below would shadow nicegui's run module otherwise
+from nicegui import app, run as _run, ui
 
 from translator import history
 from translator.engine import translate
@@ -93,7 +94,7 @@ def index():
                     with ui.row().classes("w-full items-center justify-between"):
                         with ui.row().classes("gap-2 text-neutral-500"):
                             ui.icon("attach_file")
-                            ui.button(icon="mic", on_click=lambda: start_mic()).props(
+                            mic_btn = ui.button(icon="mic", on_click=lambda: start_mic()).props(
                                 "round flat dense"
                             ).classes("text-neutral-500")
                         counter_label = ui.label("0 / 5000").classes(MUTED)
@@ -120,7 +121,7 @@ def index():
 
             with ui.row().classes("w-full items-center justify-between pt-2"):
                 ui.label("✨ Powered by language intelligence").classes(MUTED)
-                ui.button("▶ Translate", on_click=lambda: do_translate()).classes(
+                translate_btn = ui.button("▶ Translate", on_click=lambda: do_translate()).classes(
                     "rounded-full bg-white text-black px-6 py-2"
                 )
 
@@ -143,16 +144,21 @@ def index():
             source_select.value, target_select.value = target_select.value, source_select.value
             input_box.value, output_box.value = output_box.value, input_box.value
 
-        def do_translate():
+        # io_bound offloads the blocking Google Translate HTTP call to a thread pool
+        # so the NiceGUI event loop stays responsive during the request.
+        async def do_translate():
             text = (input_box.value or "").strip()
             if not text:
                 return
             source_code = LANGUAGES[source_select.value]
             target_code = TARGET_LANGUAGES[target_select.value]
+            translate_btn.props("loading")
             try:
-                result = translate(text, source_code, target_code)
+                result = await _run.io_bound(translate, text, source_code, target_code)
             except Exception as e:
                 result = f"Error: {e}"
+            finally:
+                translate_btn.props(remove="loading")
             output_box.value = result
             history.append_entry(source_code, target_code, text, result)
             recent_row.refresh()
@@ -161,28 +167,59 @@ def index():
             input_box.value = e.args
             update_counter()
 
+        def on_mic_start(_):
+            mic_btn.classes(remove="text-neutral-500", add="text-red-500")
+            ui.notify("Listening…", timeout=1500)
+
+        def on_mic_end(_):
+            mic_btn.classes(remove="text-red-500", add="text-neutral-500")
+
         def on_voice_error(e):
-            ui.notify(f"Voice unavailable: {e.args}", type="warning")
+            ui.notify(e.args, type="warning")
 
         ui.on("mic_result", on_mic_result)
+        ui.on("mic_start", on_mic_start)
+        ui.on("mic_end", on_mic_end)
         ui.on("voice_error", on_voice_error)
 
         def start_mic():
             locale = LOCALES.get(LANGUAGES[source_select.value])
             ui.run_javascript(f"""
+                // Chrome blocks the Speech API on plain HTTP origins that are not localhost.
+                // Checking isSecureContext first gives a clear error instead of "network".
+                if (!window.isSecureContext) {{
+                    emitEvent('voice_error', 'Microphone requires HTTPS or localhost');
+                    return;
+                }}
                 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
                 if (!Recognition) {{
-                    emitEvent('voice_error', 'speech recognition not supported in this browser');
-                }} else {{
-                    const recognition = new Recognition();
-                    const lang = {json.dumps(locale)};
-                    if (lang) recognition.lang = lang;
-                    recognition.continuous = false;
-                    recognition.interimResults = false;
-                    recognition.onresult = (event) => emitEvent('mic_result', event.results[0][0].transcript);
-                    recognition.onerror = (event) => emitEvent('voice_error', event.error);
-                    recognition.start();
+                    emitEvent('voice_error', 'Speech recognition not supported in this browser');
+                    return;
                 }}
+                // Guard prevents two Recognition instances from running concurrently if the
+                // mic button is clicked while a session is already active.
+                if (window._lingoRecognizing) return;
+                const ERR = {{
+                    network: 'Cannot reach speech service — check your connection',
+                    'not-allowed': 'Microphone permission denied',
+                    'service-not-allowed': 'Speech service blocked by browser',
+                    'audio-capture': 'No microphone found',
+                    'no-speech': 'No speech detected',
+                    aborted: 'Microphone stopped',
+                }};
+                const recognition = new Recognition();
+                const lang = {json.dumps(locale)};
+                if (lang) recognition.lang = lang;
+                recognition.continuous = false;
+                recognition.interimResults = false;
+                recognition.onstart = () => {{ window._lingoRecognizing = true; emitEvent('mic_start', null); }};
+                recognition.onend = () => {{ window._lingoRecognizing = false; emitEvent('mic_end', null); }};
+                recognition.onresult = (event) => emitEvent('mic_result', event.results[0][0].transcript);
+                recognition.onerror = (event) => {{
+                    window._lingoRecognizing = false;
+                    emitEvent('voice_error', ERR[event.error] || ('Voice error: ' + event.error));
+                }};
+                recognition.start();
             """)
 
         def speak_output():
