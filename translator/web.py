@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 
 # _run alias: module-level def run() below would shadow nicegui's run module otherwise
-from nicegui import app, run as _run, ui
+from nicegui import Client, app, run as _run, ui
 
 from translator import history
 from translator.engine import translate
@@ -53,7 +53,7 @@ MUTED = "text-neutral-500 text-sm"
 
 
 @ui.page("/", favicon=str(STATIC_DIR / "logo.png"))
-def index():
+async def index(client: Client):
     ui.dark_mode().enable()
     ui.query("body").classes("bg-black")
 
@@ -97,6 +97,7 @@ def index():
                             mic_btn = ui.button(icon="mic", on_click=lambda: start_mic()).props(
                                 "round flat dense"
                             ).classes("text-neutral-500")
+                            mic_btn.disable()
                         counter_label = ui.label("0 / 5000").classes(MUTED)
 
                 with ui.column().classes("justify-center"):
@@ -265,6 +266,17 @@ def index():
         with ui.row().classes("w-full max-w-4xl items-center justify-between text-neutral-500 text-sm"):
             ui.label("lingo.")
             ui.label("Made for words that travel.")
+
+    # Enable mic only after the Socket.IO handshake completes.
+    # Without this guard, emitEvent() and ui.run_javascript() silently drop on cold
+    # start (machine was sleeping, WS not ready when user clicks mic immediately).
+    await client.connected()
+    mic_btn.enable()
+
+    # Keep mic disabled whenever the connection is lost (e.g. Cloudflare idle timeout)
+    # and re-enable on reconnect so clicks never silently fail.
+    app.on_disconnect(lambda: mic_btn.disable())
+    app.on_connect(lambda: mic_btn.enable())
 
 
 def run():
