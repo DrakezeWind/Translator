@@ -91,5 +91,7 @@ async def transcribe(
         if owns_client:
             await client.aclose()
     if res.status_code != 200:
+        # Status only: never log the key or audio.
+        print(f"[stt] upstream returned {res.status_code}: {res.text[:200]}", flush=True)
         raise SttError(502, "Transcription failed")
     return (res.json().get("text") or "").strip()

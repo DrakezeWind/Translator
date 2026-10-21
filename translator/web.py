@@ -126,6 +126,7 @@ async def index(client: Client):
                                 "round flat dense"
                             ).classes("text-neutral-500")
                             mic_btn.disable()
+                            status_label = ui.label("").classes("text-sm text-red-400")
                         counter_label = ui.label("0 / 5000").classes(MUTED)
 
                 with ui.column().classes("justify-center"):
@@ -192,23 +193,35 @@ async def index(client: Client):
             history.append_entry(source_code, target_code, text, result)
             recent_row.refresh()
 
-        def on_mic_result(e):
-            input_box.value = e.args
-            update_counter()
-
         def on_mic_start(_):
             mic_btn.classes(remove="text-neutral-500", add="text-red-500")
-            ui.notify("Listening…", timeout=1500)
+            mic_btn.props("icon=stop")
+            status_label.text = "Listening… click the stop button when done"
 
         def on_mic_end(_):
             mic_btn.classes(remove="text-red-500", add="text-neutral-500")
+            mic_btn.props("icon=mic")
+            if status_label.text.startswith("Listening"):
+                status_label.text = ""
+
+        def on_mic_transcribing(_):
+            status_label.text = "Transcribing…"
+
+        def on_mic_result(e):
+            status_label.text = ""
+            input_box.value = e.args
+            update_counter()
 
         def on_voice_error(e):
+            status_label.text = ""
+            mic_btn.classes(remove="text-red-500", add="text-neutral-500")
+            mic_btn.props("icon=mic")
             ui.notify(e.args, type="warning")
 
         ui.on("mic_result", on_mic_result)
         ui.on("mic_start", on_mic_start)
         ui.on("mic_end", on_mic_end)
+        ui.on("mic_transcribing", on_mic_transcribing)
         ui.on("voice_error", on_voice_error)
 
         def start_mic():
@@ -217,7 +230,7 @@ async def index(client: Client):
             ui.run_javascript(f"""
                 // Second click while the fallback recorder is running stops it and uploads.
                 if (window._lingoRecorder) {{ window._lingoRecorder.stop(); return; }}
-                if (window._lingoRecognizing) return;
+                if (window._lingoRecognizing || window._lingoStarting) return;
 
                 const ERR = {{
                     network: 'Cannot reach speech service — check your connection',
@@ -236,16 +249,21 @@ async def index(client: Client):
                         emitEvent('voice_error', 'Voice input not supported in this browser');
                         return;
                     }}
+                    // The speech service already failed once this page load; skip straight here next time.
+                    window._lingoFallback = true;
+                    window._lingoStarting = true;
                     let stream;
                     try {{
                         stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
                     }} catch (err) {{
+                        window._lingoStarting = false;
                         emitEvent('voice_error', err.name === 'NotFoundError' ? ERR['audio-capture'] : ERR['not-allowed']);
                         return;
                     }}
                     const recorder = new MediaRecorder(stream);
                     const chunks = [];
                     window._lingoRecorder = recorder;
+                    window._lingoStarting = false;
                     recorder.ondataavailable = (e) => {{ if (e.data.size) chunks.push(e.data); }};
                     recorder.onstop = async () => {{
                         window._lingoRecorder = null;
@@ -254,6 +272,7 @@ async def index(client: Client):
                         emitEvent('mic_end', null);
                         const blob = new Blob(chunks, {{ type: recorder.mimeType || 'audio/webm' }});
                         if (!blob.size) {{ emitEvent('voice_error', ERR['no-speech']); return; }}
+                        emitEvent('mic_transcribing', null);
                         try {{
                             const res = await fetch('/api/transcribe?lang=' + encodeURIComponent({json.dumps(lang_code)}), {{
                                 method: 'POST',
@@ -279,14 +298,18 @@ async def index(client: Client):
                     return;
                 }}
                 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                if (!Recognition) {{ recordFallback(); return; }}
+                if (!Recognition || window._lingoFallback) {{ recordFallback(); return; }}
 
                 const recognition = new Recognition();
                 if (lang) recognition.lang = lang;
                 recognition.continuous = false;
                 recognition.interimResults = false;
                 recognition.onstart = () => {{ window._lingoRecognizing = true; emitEvent('mic_start', null); }};
-                recognition.onend = () => {{ window._lingoRecognizing = false; emitEvent('mic_end', null); }};
+                recognition.onend = () => {{
+                    window._lingoRecognizing = false;
+                    // onend follows onerror; don't clobber the fallback recorder's UI state.
+                    if (!window._lingoRecorder && !window._lingoStarting) emitEvent('mic_end', null);
+                }};
                 recognition.onresult = (event) => emitEvent('mic_result', event.results[0][0].transcript);
                 recognition.onerror = (event) => {{
                     window._lingoRecognizing = false;
