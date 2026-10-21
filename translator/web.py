@@ -10,6 +10,9 @@ from starlette.requests import Request
 from translator import history, stt
 from translator.engine import translate
 
+# Voice input is off until a transcription key exists (OPENAI_API_KEY); set VOICE_ENABLED=1 to show the mic.
+VOICE_ENABLED = os.environ.get("VOICE_ENABLED") == "1"
+
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.add_static_files("/static", STATIC_DIR)
 
@@ -127,6 +130,8 @@ async def index(client: Client):
                             ).classes("text-neutral-500")
                             mic_btn.disable()
                             status_label = ui.label("").classes("text-sm text-red-400")
+                            mic_btn.set_visibility(VOICE_ENABLED)
+                            status_label.set_visibility(VOICE_ENABLED)
                         counter_label = ui.label("0 / 5000").classes(MUTED)
 
                 with ui.column().classes("justify-center"):
@@ -358,6 +363,8 @@ async def index(client: Client):
                     with ui.card().classes(SUBCARD + " border-dashed"):
                         ui.label(
                             "Tip: Use the microphone to translate conversations in real time."
+                            if VOICE_ENABLED
+                            else "Tip: Swap languages with the arrows to translate back."
                         ).classes("text-neutral-400 text-sm")
 
             recent_row()
