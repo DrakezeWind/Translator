@@ -3,9 +3,11 @@ import os
 from pathlib import Path
 
 # _run alias: module-level def run() below would shadow nicegui's run module otherwise
+from fastapi.responses import JSONResponse
 from nicegui import Client, app, run as _run, ui
+from starlette.requests import Request
 
-from translator import history
+from translator import history, stt
 from translator.engine import translate
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -46,6 +48,32 @@ LOCALES = {
     "ar": "ar-SA",
     "hi": "hi-IN",
 }
+
+_rate_limiter = stt.RateLimiter()
+
+
+@app.post("/api/transcribe")
+async def api_transcribe(request: Request, lang: str = "auto"):
+    """Fallback speech-to-text: raw audio body in, {"text": ...} out."""
+    if lang not in LANGUAGES.values():
+        return JSONResponse({"error": "Unsupported language"}, status_code=400)
+    # Fly terminates TLS in front of the app and forwards the real client IP here.
+    ip = request.headers.get("fly-client-ip") or (request.client.host if request.client else "unknown")
+    if not _rate_limiter.allow(ip):
+        return JSONResponse({"error": "Too many requests"}, status_code=429)
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > stt.MAX_AUDIO_BYTES:
+        return JSONResponse({"error": "Audio too large"}, status_code=413)
+    try:
+        text = await stt.transcribe(
+            await request.body(),
+            request.headers.get("content-type", ""),
+            stt.whisper_language(lang),
+        )
+    except stt.SttError as e:
+        return JSONResponse({"error": e.message}, status_code=e.status)
+    return {"text": text}
+
 
 CARD = "rounded-2xl border border-neutral-800 bg-neutral-900 shadow-xl p-6 w-full max-w-4xl"
 SUBCARD = "rounded-xl border border-neutral-800 bg-neutral-900 p-4 flex-1"
@@ -185,21 +213,12 @@ async def index(client: Client):
 
         def start_mic():
             locale = LOCALES.get(LANGUAGES[source_select.value])
+            lang_code = LANGUAGES[source_select.value]
             ui.run_javascript(f"""
-                // Chrome blocks the Speech API on plain HTTP origins that are not localhost.
-                // Checking isSecureContext first gives a clear error instead of "network".
-                if (!window.isSecureContext) {{
-                    emitEvent('voice_error', 'Microphone requires HTTPS or localhost');
-                    return;
-                }}
-                const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-                if (!Recognition) {{
-                    emitEvent('voice_error', 'Speech recognition not supported in this browser');
-                    return;
-                }}
-                // Guard prevents two Recognition instances from running concurrently if the
-                // mic button is clicked while a session is already active.
+                // Second click while the fallback recorder is running stops it and uploads.
+                if (window._lingoRecorder) {{ window._lingoRecorder.stop(); return; }}
                 if (window._lingoRecognizing) return;
+
                 const ERR = {{
                     network: 'Cannot reach speech service — check your connection',
                     'not-allowed': 'Microphone permission denied',
@@ -208,8 +227,61 @@ async def index(client: Client):
                     'no-speech': 'No speech detected',
                     aborted: 'Microphone stopped',
                 }};
-                const recognition = new Recognition();
                 const lang = {json.dumps(locale)};
+
+                // Fallback: record audio and have the server transcribe it, for browsers where
+                // the built-in speech service is unavailable or unreachable.
+                async function recordFallback() {{
+                    if (!navigator.mediaDevices || !window.MediaRecorder) {{
+                        emitEvent('voice_error', 'Voice input not supported in this browser');
+                        return;
+                    }}
+                    let stream;
+                    try {{
+                        stream = await navigator.mediaDevices.getUserMedia({{ audio: true }});
+                    }} catch (err) {{
+                        emitEvent('voice_error', err.name === 'NotFoundError' ? ERR['audio-capture'] : ERR['not-allowed']);
+                        return;
+                    }}
+                    const recorder = new MediaRecorder(stream);
+                    const chunks = [];
+                    window._lingoRecorder = recorder;
+                    recorder.ondataavailable = (e) => {{ if (e.data.size) chunks.push(e.data); }};
+                    recorder.onstop = async () => {{
+                        window._lingoRecorder = null;
+                        clearTimeout(cap);
+                        stream.getTracks().forEach((t) => t.stop());
+                        emitEvent('mic_end', null);
+                        const blob = new Blob(chunks, {{ type: recorder.mimeType || 'audio/webm' }});
+                        if (!blob.size) {{ emitEvent('voice_error', ERR['no-speech']); return; }}
+                        try {{
+                            const res = await fetch('/api/transcribe?lang=' + encodeURIComponent({json.dumps(lang_code)}), {{
+                                method: 'POST',
+                                headers: {{ 'Content-Type': blob.type }},
+                                body: blob,
+                            }});
+                            const data = await res.json().catch(() => ({{}}));
+                            if (!res.ok) {{ emitEvent('voice_error', data.error || 'Transcription failed'); return; }}
+                            if (data.text) emitEvent('mic_result', data.text);
+                            else emitEvent('voice_error', ERR['no-speech']);
+                        }} catch (err) {{
+                            emitEvent('voice_error', 'Could not reach the server');
+                        }}
+                    }};
+                    const cap = setTimeout(() => recorder.state !== 'inactive' && recorder.stop(), 15000);
+                    recorder.start();
+                    emitEvent('mic_start', null);
+                }}
+
+                // Chrome blocks mic access on plain HTTP origins that are not localhost.
+                if (!window.isSecureContext) {{
+                    emitEvent('voice_error', 'Microphone requires HTTPS or localhost');
+                    return;
+                }}
+                const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!Recognition) {{ recordFallback(); return; }}
+
+                const recognition = new Recognition();
                 if (lang) recognition.lang = lang;
                 recognition.continuous = false;
                 recognition.interimResults = false;
@@ -218,6 +290,10 @@ async def index(client: Client):
                 recognition.onresult = (event) => emitEvent('mic_result', event.results[0][0].transcript);
                 recognition.onerror = (event) => {{
                     window._lingoRecognizing = false;
+                    if (event.error === 'network' || event.error === 'service-not-allowed') {{
+                        recordFallback();
+                        return;
+                    }}
                     emitEvent('voice_error', ERR[event.error] || ('Voice error: ' + event.error));
                 }};
                 recognition.start();
@@ -273,10 +349,11 @@ async def index(client: Client):
     await client.connected()
     mic_btn.enable()
 
-    # Keep mic disabled whenever the connection is lost (e.g. Cloudflare idle timeout)
-    # and re-enable on reconnect so clicks never silently fail.
-    app.on_disconnect(lambda: mic_btn.disable())
-    app.on_connect(lambda: mic_btn.enable())
+    # Keep mic disabled whenever this client's connection is lost (e.g. Cloudflare idle
+    # timeout) and re-enable on reconnect so clicks never silently fail. Per-client, so
+    # handlers don't pile up on the global app or touch another visitor's button.
+    client.on_disconnect(lambda: mic_btn.disable())
+    client.on_connect(lambda: mic_btn.enable())
 
 
 def run():
